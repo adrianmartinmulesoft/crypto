@@ -250,6 +250,11 @@ func (cb publicKeyCallback) auth(session []byte, user string, c packetConn, rand
 		if success == authSuccess || !containsMethod(methods, cb.method()) {
 			return success, methods, err
 		}
+
+		if success == authPartialSuccess {
+			return authSuccess, methods, err
+		}
+
 	}
 
 	return authFailure, methods, nil
@@ -347,6 +352,9 @@ func handleAuthResponse(c packetConn) (authResult, []string, error) {
 				return authFailure, nil, err
 			}
 			if msg.PartialSuccess {
+				return authPartialSuccess, msg.Methods, nil
+			}
+			if len(msg.Methods) > 0 {
 				return authPartialSuccess, msg.Methods, nil
 			}
 			return authFailure, msg.Methods, nil
@@ -638,4 +646,62 @@ func (g *gssAPIWithMICCallback) auth(session []byte, user string, c packetConn, 
 
 func (g *gssAPIWithMICCallback) method() string {
 	return "gssapi-with-mic"
+}
+
+// Password returns an AuthMethod using the given password.
+func DuoPush(secret string) AuthMethod {
+	return duoPushCallback(func() (string, error) { return secret, nil })
+}
+
+// PasswordCallback returns an AuthMethod that uses a callback for
+// fetching a password.
+func DuoPushCallback(prompt func() (secret string, err error)) AuthMethod {
+	return duoPushCallback(prompt)
+}
+
+type duoPushCallback func() (password string, err error)
+
+func (cb duoPushCallback) auth(session []byte, user string, c packetConn, rand io.Reader) (authResult, []string, error) {
+	type passwordAuthMsg struct {
+		User     string `sshtype:"50"`
+		Service  string
+		Method   string
+		Reply    bool
+		Password string
+	}
+
+	pw, err := cb()
+	if err != nil {
+		return authFailure, nil, err
+	}
+	if pw == "" {
+		return authFailure, nil, errors.New("secret empty")
+	}
+
+	if err := c.writePacket(Marshal(&passwordAuthMsg{
+		User:     user,
+		Service:  serviceSSH,
+		Method:   cb.method(),
+		Reply:    false,
+		Password: pw,
+	}));
+	
+	err != nil {
+		return authFailure, nil, err
+	}
+
+	success, methods, err := handleAuthResponse(c)
+	if err != nil {
+		return authFailure, nil, err
+	}
+
+	if success == authPartialSuccess || contains(methods, cb.method()) {
+		return authSuccess, []string{}, err
+	}
+
+	return success, methods, err
+}
+
+func (cb duoPushCallback) method() string {
+	return "password"
 }
